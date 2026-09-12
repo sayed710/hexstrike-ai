@@ -1,6 +1,7 @@
 """Regression coverage for HexStrike's health-tool detection."""
 
 import importlib
+import zipfile
 
 import pytest
 
@@ -130,6 +131,96 @@ def test_hashcat_utils_requires_an_executable_sentinel(server):
     ) is False
 
 
+def _write_stegsolve_jar(path, main_class="stegsolve.StegSolve"):
+    with zipfile.ZipFile(path, "w") as jar:
+        jar.writestr(
+            "META-INF/MANIFEST.MF",
+            f"Manifest-Version: 1.0\nMain-Class: {main_class}\n",
+        )
+
+
+def test_health_detects_valid_stegsolve_jar(server, monkeypatch, tmp_path):
+    jar = tmp_path / "stegsolve.jar"
+    _write_stegsolve_jar(jar)
+    monkeypatch.setattr(
+        server,
+        "TOOL_JAR_SENTINELS",
+        {"stegsolve": ((str(jar), "stegsolve.StegSolve"),)},
+        raising=False,
+    )
+
+    assert server._tool_is_available("stegsolve") is True
+
+
+def _corrupt_compressed_manifest(path):
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as jar:
+        jar.writestr(
+            "META-INF/MANIFEST.MF",
+            "Manifest-Version: 1.0\nMain-Class: stegsolve.StegSolve\n" + "X" * 5000,
+        )
+    raw = bytearray(path.read_bytes())
+    with zipfile.ZipFile(path) as jar:
+        info = jar.getinfo("META-INF/MANIFEST.MF")
+    name_length = int.from_bytes(raw[info.header_offset + 26:info.header_offset + 28], "little")
+    extra_length = int.from_bytes(raw[info.header_offset + 28:info.header_offset + 30], "little")
+    data_start = info.header_offset + 30 + name_length + extra_length
+    raw[data_start + max(1, info.compress_size // 2)] ^= 0xFF
+    path.write_bytes(raw)
+
+
+def test_stegsolve_jar_sentinel_rejects_corrupt_compressed_manifest(server, monkeypatch, tmp_path):
+    jar = tmp_path / "corrupt.jar"
+    _corrupt_compressed_manifest(jar)
+    monkeypatch.setattr(
+        server,
+        "TOOL_JAR_SENTINELS",
+        {"stegsolve": ((str(jar), "stegsolve.StegSolve"),)},
+        raising=False,
+    )
+
+    assert server._tool_is_available("stegsolve") is False
+
+
+def test_stegsolve_jar_sentinel_ignores_named_manifest_sections(server, monkeypatch, tmp_path):
+    jar = tmp_path / "section.jar"
+    with zipfile.ZipFile(jar, "w") as archive:
+        archive.writestr(
+            "META-INF/MANIFEST.MF",
+            "Manifest-Version: 1.0\n\nName: fake\nMain-Class: stegsolve.StegSolve\n",
+        )
+    monkeypatch.setattr(
+        server,
+        "TOOL_JAR_SENTINELS",
+        {"stegsolve": ((str(jar), "stegsolve.StegSolve"),)},
+        raising=False,
+    )
+
+    assert server._tool_is_available("stegsolve") is False
+
+
+@pytest.mark.parametrize("fixture", ["missing", "directory", "invalid", "wrong-main", "symlink"])
+def test_stegsolve_jar_sentinel_rejects_invalid_paths(server, monkeypatch, tmp_path, fixture):
+    jar = tmp_path / "stegsolve.jar"
+    if fixture == "directory":
+        jar.mkdir()
+    elif fixture == "invalid":
+        jar.write_text("not a jar", encoding="utf-8")
+    elif fixture == "wrong-main":
+        _write_stegsolve_jar(jar, main_class="other.Main")
+    elif fixture == "symlink":
+        target = tmp_path / "target.jar"
+        _write_stegsolve_jar(target)
+        jar.symlink_to(target)
+    monkeypatch.setattr(
+        server,
+        "TOOL_JAR_SENTINELS",
+        {"stegsolve": ((str(jar), "stegsolve.StegSolve"),)},
+        raising=False,
+    )
+
+    assert server._tool_is_available("stegsolve") is False
+
+
 @pytest.mark.parametrize(
     "label",
     ["api-schema-analyzer", "graphql-scanner", "have-i-been-pwned", "jwt-analyzer"],
@@ -153,7 +244,7 @@ def test_health_totals_and_labels_are_unique(server, monkeypatch):
 
 @pytest.mark.parametrize(
     "label",
-    ["hashpump", "outguess", "terrascan", "falco", "stegsolve"],
+    ["hashpump", "outguess", "terrascan", "falco"],
 )
 def test_genuinely_unavailable_tools_remain_unavailable(server, monkeypatch, label):
     assert server._tool_is_available(

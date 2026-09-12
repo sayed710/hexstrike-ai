@@ -39,6 +39,7 @@ import shutil
 import stat
 import venv
 import zipfile
+import zlib
 from pathlib import Path
 from flask import Flask, request, jsonify
 import psutil
@@ -9059,6 +9060,10 @@ TOOL_PATH_SENTINELS = {
 }
 
 # These names describe optional APIs/capabilities, not local executables.
+TOOL_JAR_SENTINELS = {
+    "stegsolve": (("/opt/stegsolve/stegsolve.jar", "stegsolve.StegSolve"),),
+}
+
 NON_EXECUTABLE_TOOL_LABELS = frozenset({
     "api-schema-analyzer",
     "graphql-scanner",
@@ -9095,6 +9100,34 @@ def _is_executable_file(path):
     return bool(metadata.st_mode & executable_bits) and os.access(path, os.X_OK)
 
 
+def _is_jar_file(path, main_class):
+    """Return whether path is a readable JAR with the expected main class."""
+    try:
+        metadata = os.lstat(path)
+        if not stat.S_ISREG(metadata.st_mode) or not os.access(path, os.R_OK):
+            return False
+        with zipfile.ZipFile(path) as jar:
+            manifest = jar.read("META-INF/MANIFEST.MF").decode("utf-8")
+    except (OSError, UnicodeError, KeyError, zipfile.BadZipFile, zlib.error, EOFError, RuntimeError):
+        return False
+    main_class_value = None
+    current_key = None
+    for line in manifest.splitlines():
+        if not line.strip():
+            break
+        if line.startswith((" ", "\t")):
+            if current_key == "Main-Class" and main_class_value is not None:
+                main_class_value += line[1:]
+            continue
+        key, separator, value = line.partition(":")
+        if not separator:
+            return False
+        current_key = key.strip()
+        if current_key == "Main-Class":
+            main_class_value = value.lstrip()
+    return main_class_value == main_class
+
+
 def _tool_is_available(tool, executable_finder=None, executable_file_checker=None):
     """Detect one capability using local executable/file metadata only."""
     executable_finder = executable_finder or shutil.which
@@ -9114,6 +9147,8 @@ def _tool_is_available(tool, executable_finder=None, executable_file_checker=Non
         return any(executable_file_checker(path) for path in TOOL_FILE_SENTINELS[tool])
     if tool in TOOL_PATH_SENTINELS:
         return any(executable_file_checker(path) for path in TOOL_PATH_SENTINELS[tool])
+    if tool in TOOL_JAR_SENTINELS:
+        return any(_is_jar_file(path, main_class) for path, main_class in TOOL_JAR_SENTINELS[tool])
     return path_is_executable(tool)
 
 
