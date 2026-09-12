@@ -60,7 +60,9 @@ def test_official_hibp_test_account_lookup_is_opt_in():
         pytest.skip("official HIBP test-facility checks are opt-in")
 
     # HIBP documents this key and address specifically for its test facility.
-    result = HIBPClient("0" * 32).breached_account("hibp-integration-tests.com")
+    result = HIBPClient("0" * 32).breached_account(
+        "account-exists@hibp-integration-tests.com"
+    )
 
     # The facility's response is intentionally treated only as an HTTP result;
     # neither the address nor the response body is logged or persisted.
