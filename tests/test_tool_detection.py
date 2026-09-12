@@ -5,6 +5,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,70 @@ def test_health_detects_installed_executable_aliases(server):
         executable_finder=finder,
         executable_file_checker=checker,
     ) is False
+
+
+BUILTIN_CAPABILITY_CASES = (
+    ("api-schema-analyzer", "/api/tools/api_schema_analyzer", "api_schema_analyzer"),
+    ("graphql-scanner", "/api/tools/graphql_scanner", "graphql_scanner"),
+    ("jwt-analyzer", "/api/tools/jwt_analyzer", "jwt_analyzer"),
+)
+
+
+def _patch_builtin_route_metadata(server, monkeypatch, path, endpoint, methods=("POST",), view_endpoint=None):
+    rule = SimpleNamespace(rule=path, endpoint=endpoint, methods=set(methods))
+    url_map = SimpleNamespace(iter_rules=lambda: iter((rule,)))
+    monkeypatch.setattr(server.app, "url_map", url_map)
+    monkeypatch.setattr(
+        server.app,
+        "view_functions",
+        {view_endpoint or endpoint: lambda: None},
+    )
+
+
+@pytest.mark.parametrize("label, path, endpoint", BUILTIN_CAPABILITY_CASES)
+def test_builtin_capability_is_available_for_registered_post_route(server, monkeypatch, label, path, endpoint):
+    _patch_builtin_route_metadata(server, monkeypatch, path, endpoint)
+
+    assert server._tool_is_available(label) is True
+
+
+@pytest.mark.parametrize("label, path, endpoint", BUILTIN_CAPABILITY_CASES)
+@pytest.mark.parametrize("missing", ["route", "function"])
+def test_builtin_capability_is_unavailable_when_registration_is_incomplete(
+    server, monkeypatch, label, path, endpoint, missing
+):
+    if missing == "route":
+        monkeypatch.setattr(server.app, "url_map", SimpleNamespace(iter_rules=lambda: iter(())))
+        monkeypatch.setattr(server.app, "view_functions", {endpoint: lambda: None})
+    else:
+        _patch_builtin_route_metadata(server, monkeypatch, path, endpoint, view_endpoint="other_endpoint")
+
+    assert server._tool_is_available(label) is False
+
+
+@pytest.mark.parametrize("label, path, endpoint", BUILTIN_CAPABILITY_CASES)
+@pytest.mark.parametrize("mismatch", ["endpoint", "method"])
+def test_builtin_capability_rejects_wrong_endpoint_or_missing_post(
+    server, monkeypatch, label, path, endpoint, mismatch
+):
+    if mismatch == "endpoint":
+        _patch_builtin_route_metadata(server, monkeypatch, path, "wrong_endpoint", view_endpoint=endpoint)
+    else:
+        _patch_builtin_route_metadata(server, monkeypatch, path, endpoint, methods=("GET",))
+
+    assert server._tool_is_available(label) is False
+
+
+@pytest.mark.parametrize("label, path, endpoint", BUILTIN_CAPABILITY_CASES)
+def test_builtin_detection_reads_metadata_without_invoking_route(server, monkeypatch, label, path, endpoint):
+    def forbidden_route_execution():
+        raise AssertionError("built-in capability detection must not invoke routes")
+
+    rule = SimpleNamespace(rule=path, endpoint=endpoint, methods={"POST"})
+    monkeypatch.setattr(server.app, "url_map", SimpleNamespace(iter_rules=lambda: iter((rule,))))
+    monkeypatch.setattr(server.app, "view_functions", {endpoint: forbidden_route_execution})
+
+    assert server._tool_is_available(label) is True
 
 
 def test_python_package_detection_accepts_import_discoverable_angr(server, monkeypatch):
@@ -287,11 +352,8 @@ def test_stegsolve_jar_sentinel_rejects_invalid_paths(server, monkeypatch, tmp_p
     assert server._tool_is_available("stegsolve") is False
 
 
-@pytest.mark.parametrize(
-    "label",
-    ["api-schema-analyzer", "graphql-scanner", "have-i-been-pwned", "jwt-analyzer"],
-)
-def test_conceptual_labels_remain_unavailable(server, label):
+@pytest.mark.parametrize("label", ["have-i-been-pwned"])
+def test_non_local_labels_remain_unavailable(server, label):
     assert server._tool_is_available(
         label,
         executable_finder=lambda name: "/tmp/fake-executable",

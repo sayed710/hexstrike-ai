@@ -9065,16 +9065,19 @@ TOOL_PYTHON_PACKAGE_SENTINELS = {
     "angr": "angr",
 }
 
+TOOL_BUILTIN_CAPABILITY_SENTINELS = {
+    "api-schema-analyzer": ("/api/tools/api_schema_analyzer", "api_schema_analyzer", "POST"),
+    "graphql-scanner": ("/api/tools/graphql_scanner", "graphql_scanner", "POST"),
+    "jwt-analyzer": ("/api/tools/jwt_analyzer", "jwt_analyzer", "POST"),
+}
+
 # These names describe optional APIs/capabilities, not local executables.
 TOOL_JAR_SENTINELS = {
     "stegsolve": (("/opt/stegsolve/stegsolve.jar", "stegsolve.StegSolve"),),
 }
 
 NON_EXECUTABLE_TOOL_LABELS = frozenset({
-    "api-schema-analyzer",
-    "graphql-scanner",
     "have-i-been-pwned",
-    "jwt-analyzer",
 })
 
 
@@ -9144,11 +9147,27 @@ def _is_python_package_available(package_name):
         return False
 
 
+def _is_builtin_capability_available(tool):
+    """Return whether an internal Flask capability is registered and callable."""
+    route, endpoint, required_method = TOOL_BUILTIN_CAPABILITY_SENTINELS[tool]
+    view_function = app.view_functions.get(endpoint)
+    if not callable(view_function):
+        return False
+    return any(
+        rule.rule == route
+        and rule.endpoint == endpoint
+        and required_method in getattr(rule, "methods", ())
+        for rule in app.url_map.iter_rules()
+    )
+
+
 def _tool_is_available(tool, executable_finder=None, executable_file_checker=None):
     """Detect one capability using local executable/file/package metadata."""
     executable_finder = executable_finder or shutil.which
     executable_file_checker = executable_file_checker or _is_executable_file
 
+    if tool in TOOL_BUILTIN_CAPABILITY_SENTINELS:
+        return _is_builtin_capability_available(tool)
     if tool in NON_EXECUTABLE_TOOL_LABELS:
         return False
     def path_is_executable(candidate):
