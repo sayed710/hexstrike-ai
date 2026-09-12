@@ -417,3 +417,26 @@ def test_domain_lookup_has_no_verification_or_dns_workflow():
     client = HIBPClient("a" * 32, transport=transport)
     client.breached_domain("example.org", [{"DomainName": "example.org"}])
     assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("authorized", ["example.org", {"DomainName": "example.org"}, [{"DomainName": "example.org"}, 4], [{"Other": "example.org"}]])
+def test_breached_domain_rejects_malformed_authorization_without_transport(authorized):
+    transport = FakeTransport(FakeResponse(200, {}, {}))
+    client = HIBPClient("a" * 32, transport=transport)
+    result = client.breached_domain("example.org", authorized)
+    assert not result.ok
+    assert result.error.category in {
+        HIBPErrorCategory.INVALID_CONFIGURATION,
+        HIBPErrorCategory.INVALID_RESPONSE,
+    }
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("domain", [None, 123, "", "   ", "."])
+def test_breached_domain_rejects_invalid_domain_without_transport(domain):
+    transport = FakeTransport(FakeResponse(200, {}, {}))
+    client = HIBPClient("a" * 32, transport=transport)
+    result = client.breached_domain(domain, [{"DomainName": "example.org"}])
+    assert not result.ok
+    assert result.error.category is HIBPErrorCategory.INVALID_CONFIGURATION
+    assert transport.calls == []

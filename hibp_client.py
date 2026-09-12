@@ -131,7 +131,11 @@ class HIBPClient:
             return result
         records = []
         for record in result.data:
-            if not isinstance(record, dict) or not isinstance(record.get("DomainName"), str):
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("DomainName"), str)
+                or not record["DomainName"].strip()
+            ):
                 return self._error(
                     HIBPErrorCategory.INVALID_RESPONSE,
                     "HIBP returned an invalid response",
@@ -142,17 +146,25 @@ class HIBPClient:
 
     def breached_domain(self, domain: str, subscribed_domains: object = ()) -> HIBPResult:
         normalized = _normalize_domain(domain)
-        authorized = {
-            _normalize_domain(item.get("DomainName"))
-            for item in subscribed_domains
-            if isinstance(item, dict) and isinstance(item.get("DomainName"), str)
-        }
-        authorized.update(
-            _normalize_domain(item)
-            for item in subscribed_domains
-            if isinstance(item, str)
-        )
-        if not normalized or normalized not in authorized:
+        if normalized is None:
+            return self._error(HIBPErrorCategory.INVALID_CONFIGURATION, "A valid domain is required")
+        if not isinstance(subscribed_domains, (list, tuple)):
+            return self._error(HIBPErrorCategory.INVALID_CONFIGURATION, "Subscribed domains must be a list")
+        authorized = set()
+        for item in subscribed_domains:
+            if isinstance(item, dict):
+                value = item.get("DomainName")
+                if not isinstance(value, str) or not value.strip():
+                    return self._error(HIBPErrorCategory.INVALID_RESPONSE, "Subscribed domains are invalid")
+            elif isinstance(item, str):
+                value = item
+            else:
+                return self._error(HIBPErrorCategory.INVALID_RESPONSE, "Subscribed domains are invalid")
+            normalized_item = _normalize_domain(value)
+            if normalized_item is None:
+                return self._error(HIBPErrorCategory.INVALID_RESPONSE, "Subscribed domains are invalid")
+            authorized.add(normalized_item)
+        if normalized not in authorized:
             return self._error(HIBPErrorCategory.FORBIDDEN, "Domain is not authorized")
         return self._get("breachedDomain/" + quote(normalized, safe=""), expected_type=dict)
 
@@ -245,6 +257,10 @@ def _safe_subscription_metadata(data: object) -> dict[str, object]:
     }
 
 
-def _normalize_domain(domain: str) -> str:
+def _normalize_domain(domain: object) -> str | None:
+    if not isinstance(domain, str):
+        return None
     normalized = domain.strip().lower()
-    return normalized[:-1] if normalized.endswith(".") else normalized
+    if normalized.endswith("."):
+        normalized = normalized[:-1]
+    return normalized or None
