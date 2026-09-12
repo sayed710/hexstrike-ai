@@ -40,6 +40,8 @@ import stat
 import venv
 import zipfile
 import zlib
+import importlib.metadata
+import importlib.util
 from pathlib import Path
 from flask import Flask, request, jsonify
 import psutil
@@ -9059,6 +9061,10 @@ TOOL_PATH_SENTINELS = {
     "libc-database": ("/opt/libc-database/find",),
 }
 
+TOOL_PYTHON_PACKAGE_SENTINELS = {
+    "angr": "angr",
+}
+
 # These names describe optional APIs/capabilities, not local executables.
 TOOL_JAR_SENTINELS = {
     "stegsolve": (("/opt/stegsolve/stegsolve.jar", "stegsolve.StegSolve"),),
@@ -9128,8 +9134,18 @@ def _is_jar_file(path, main_class):
     return main_class_value == main_class
 
 
+def _is_python_package_available(package_name):
+    """Return whether a Python package is discoverable with valid metadata."""
+    try:
+        if importlib.util.find_spec(package_name) is None:
+            return False
+        return bool(importlib.metadata.version(package_name))
+    except (ImportError, ModuleNotFoundError, ValueError, importlib.metadata.PackageNotFoundError):
+        return False
+
+
 def _tool_is_available(tool, executable_finder=None, executable_file_checker=None):
-    """Detect one capability using local executable/file metadata only."""
+    """Detect one capability using local executable/file/package metadata."""
     executable_finder = executable_finder or shutil.which
     executable_file_checker = executable_file_checker or _is_executable_file
 
@@ -9149,6 +9165,8 @@ def _tool_is_available(tool, executable_finder=None, executable_file_checker=Non
         return any(executable_file_checker(path) for path in TOOL_PATH_SENTINELS[tool])
     if tool in TOOL_JAR_SENTINELS:
         return any(_is_jar_file(path, main_class) for path, main_class in TOOL_JAR_SENTINELS[tool])
+    if tool in TOOL_PYTHON_PACKAGE_SENTINELS:
+        return _is_python_package_available(TOOL_PYTHON_PACKAGE_SENTINELS[tool])
     return path_is_executable(tool)
 
 

@@ -1,6 +1,9 @@
 """Regression coverage for HexStrike's health-tool detection."""
 
+import builtins
 import importlib
+import importlib.metadata
+import importlib.util
 import zipfile
 
 import pytest
@@ -43,6 +46,69 @@ def test_health_detects_installed_executable_aliases(server):
         executable_finder=finder,
         executable_file_checker=checker,
     ) is False
+
+
+def test_python_package_detection_accepts_import_discoverable_angr(server, monkeypatch):
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: object() if name == "angr" else None,
+    )
+    def package_version(name):
+        if name == "angr":
+            return "9.2.120"
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", package_version)
+
+    assert server._tool_is_available("angr") is True
+
+
+def test_python_package_detection_rejects_missing_angr_module(server, monkeypatch):
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "9.2.120")
+
+    assert server._tool_is_available("angr") is False
+
+
+def test_python_package_detection_rejects_missing_angr_metadata(server, monkeypatch):
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: object() if name == "angr" else None,
+    )
+
+    def missing_metadata(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing_metadata)
+
+    assert server._tool_is_available("angr") is False
+
+
+def test_health_detects_angr_without_importing_or_executing_package(server, monkeypatch):
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: object() if name == "angr" else None,
+    )
+    real_version = importlib.metadata.version
+
+    def package_version(name):
+        return "9.2.120" if name == "angr" else real_version(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", package_version)
+    real_import = builtins.__import__
+
+    def reject_angr_import(name, *args, **kwargs):
+        if name == "angr" or name.startswith("angr."):
+            raise AssertionError("health detection must not import angr")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_angr_import)
+    payload = server.app.test_client().get("/health").get_json()
+
+    assert payload["tools_status"]["angr"] is True
 
 
 def test_health_detects_suite_sentinels_and_libc_database(server):
