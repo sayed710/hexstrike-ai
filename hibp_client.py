@@ -14,6 +14,15 @@ import requests
 
 DEFAULT_USER_AGENT = "HexStrike-AI-HIBP-Integration"
 DEFAULT_BASE_URL = "https://haveibeenpwned.com/api/v3"
+_SAFE_SUBSCRIPTION_FIELDS = {
+    "SubscriptionName": str,
+    "Description": str,
+    "SubscribedUntil": str,
+    "Rpm": int,
+    "DomainSearches": int,
+    "IncludeStealerLogs": bool,
+    "IncludeAffiliateSearches": bool,
+}
 
 
 class HIBPErrorCategory(str, Enum):
@@ -107,7 +116,14 @@ class HIBPClient:
         )
 
     def subscription_status(self) -> HIBPResult:
-        return self._get("subscription/status", expected_type=dict)
+        result = self._get("subscription/status", expected_type=dict)
+        if not result.ok:
+            return result
+        return HIBPResult(
+            ok=True,
+            data=_safe_subscription_metadata(result.data),
+            status_code=result.status_code,
+        )
 
     def subscribed_domains(self) -> HIBPResult:
         return self._get("subscribedDomains", expected_type=list)
@@ -189,3 +205,16 @@ class HIBPClient:
             status_code=status_code,
             error=HIBPError(category, message, status_code, retry_after_seconds),
         )
+
+
+def _safe_subscription_metadata(data: object) -> dict[str, object]:
+    """Retain only documented, non-secret subscription metadata."""
+    if not isinstance(data, dict):
+        return {}
+    return {
+        field: value
+        for field, expected_type in _SAFE_SUBSCRIPTION_FIELDS.items()
+        if (value := data.get(field)) is not None
+        and isinstance(value, expected_type)
+        and not (expected_type is int and isinstance(value, bool))
+    }

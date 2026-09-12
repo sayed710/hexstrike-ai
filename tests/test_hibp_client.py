@@ -4,6 +4,7 @@ import pytest
 import requests
 
 from hibp_client import HIBPClient, HIBPErrorCategory
+import hexstrike_server as server
 
 
 @dataclass
@@ -140,6 +141,110 @@ def test_subscription_status_rejects_list_json():
     client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, [], {})))
     result = client.subscription_status()
     assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
+
+
+def test_subscription_status_parses_safe_metadata():
+    payload = {
+        "SubscriptionName": "Pwned 1",
+        "Description": "Test subscription",
+        "SubscribedUntil": "2027-01-01T00:00:00Z",
+        "Rpm": 10,
+        "DomainSearches": 5,
+        "IncludeStealerLogs": True,
+        "IncludeAffiliateSearches": False,
+        "Unexpected": "must not be retained",
+    }
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, payload, {})))
+
+    result = client.subscription_status()
+
+    assert result.ok
+    assert result.status_code == 200
+    assert result.data == {
+        "SubscriptionName": "Pwned 1",
+        "Description": "Test subscription",
+        "SubscribedUntil": "2027-01-01T00:00:00Z",
+        "Rpm": 10,
+        "DomainSearches": 5,
+        "IncludeStealerLogs": True,
+        "IncludeAffiliateSearches": False,
+    }
+
+
+def test_subscription_status_rejects_non_object_json():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, [], {})))
+
+    result = client.subscription_status()
+
+    assert not result.ok
+    assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
+
+
+@pytest.fixture(autouse=True)
+def clear_hibp_verification_state():
+    server._hibp_invalidate_verification()
+    yield
+    server._hibp_invalidate_verification()
+
+
+def test_mark_verified_records_only_fingerprint_and_timestamp(monkeypatch):
+    key = "a" * 32
+    subscription = {"SubscriptionName": "Pwned 1", "Rpm": 10}
+    monkeypatch.setattr(server.time, "time", lambda: 1000.0)
+
+    assert server._hibp_mark_verified(key, subscription=subscription)
+
+    state = server._hibp_verification_state
+    assert state.key_fingerprint == server._hibp_key_fingerprint(key)
+    assert state.verified_at == 1000.0
+    assert state.subscription == subscription
+    assert key not in vars(state).values()
+
+
+def test_failed_verification_does_not_mark_verified():
+    key = "b" * 32
+    failed_result = HIBPClient(
+        key, transport=FakeTransport(FakeResponse(401, {}, {}))
+    ).subscription_status()
+
+    if failed_result.ok and failed_result.status_code == 200 and isinstance(failed_result.data, dict):
+        server._hibp_mark_verified(key, subscription=failed_result.data)
+
+    assert not server._hibp_is_verified(key)
+
+
+def test_expired_verification_is_not_verified(monkeypatch):
+    key = "c" * 32
+    monkeypatch.setattr(server.time, "time", lambda: 1000.0)
+    assert server._hibp_mark_verified(key, subscription={"SubscriptionName": "Pwned 1"})
+
+    monkeypatch.setattr(
+        server.time,
+        "time",
+        lambda: 1000.0 + server.HIBP_VERIFICATION_TTL_SECONDS + 1,
+    )
+
+    assert not server._hibp_is_verified(key)
+
+
+def test_changed_api_key_invalidates_prior_verification(monkeypatch):
+    original_key = "d" * 32
+    changed_key = "e" * 32
+    monkeypatch.setattr(server.time, "time", lambda: 1000.0)
+    assert server._hibp_mark_verified(original_key, subscription={"SubscriptionName": "Pwned 1"})
+
+    assert not server._hibp_is_verified(changed_key)
+    assert not server._hibp_is_verified(original_key)
+
+
+def test_verification_state_never_contains_raw_api_key(monkeypatch):
+    key = "f" * 32
+    monkeypatch.setattr(server.time, "time", lambda: 1000.0)
+
+    assert server._hibp_mark_verified(key, subscription={"SubscriptionName": "Pwned 1"})
+
+    assert key not in vars(server._hibp_verification_state).values()
+    assert key not in repr(server._hibp_verification_state)
 
 
 def test_breached_account_rejects_object_json():

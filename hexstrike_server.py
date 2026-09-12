@@ -19,6 +19,7 @@ Framework: FastMCP integration for AI agent communication
 """
 
 import argparse
+import hmac
 import json
 import logging
 import os
@@ -28,12 +29,13 @@ import traceback
 import threading
 import time
 import hashlib
+import secrets
 import pickle
 import base64
 import queue
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Mapping, Optional
 from collections import OrderedDict
 import shutil
 import stat
@@ -68,6 +70,7 @@ import mitmproxy
 from mitmproxy import http as mitmhttp
 from mitmproxy.tools.dump import DumpMaster
 from mitmproxy.options import Options as MitmOptions
+from hibp_client import HIBPClient, _safe_subscription_metadata
 
 # ============================================================================
 # LOGGING CONFIGURATION (MUST BE FIRST)
@@ -9079,6 +9082,98 @@ TOOL_JAR_SENTINELS = {
 NON_EXECUTABLE_TOOL_LABELS = frozenset({
     "have-i-been-pwned",
 })
+
+
+# Verification is deliberately process-local.  A restart produces a new salt
+# and empty state, so prior verification never survives process boundaries.
+HIBP_VERIFICATION_TTL_SECONDS = 900
+_HIBP_FINGERPRINT_SALT = secrets.token_bytes(32)
+
+
+@dataclass
+class HIBPVerificationState:
+    """Non-secret evidence that the currently configured key was verified."""
+
+    key_fingerprint: str | None = None
+    verified_at: float | None = None
+    subscription: Mapping[str, object] | None = None
+
+
+_hibp_verification_state = HIBPVerificationState()
+
+
+def _hibp_key_fingerprint(api_key: str | None) -> str | None:
+    """Return a process-salted fingerprint without retaining the API key."""
+    if not HIBPClient.validate_api_key(api_key):
+        return None
+    return hmac.new(
+        _HIBP_FINGERPRINT_SALT,
+        api_key.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _hibp_invalidate_verification() -> None:
+    """Clear the in-memory verification evidence."""
+    global _hibp_verification_state
+    _hibp_verification_state = HIBPVerificationState()
+
+
+def _hibp_mark_verified(
+    api_key: str | None,
+    now: float | None = None,
+    subscription: Mapping[str, object] | None = None,
+) -> bool:
+    """Record successful explicit verification using only non-secret state."""
+    fingerprint = _hibp_key_fingerprint(api_key)
+    if fingerprint is None or not isinstance(subscription, Mapping):
+        _hibp_invalidate_verification()
+        return False
+    try:
+        verified_at = time.time() if now is None else float(now)
+    except (TypeError, ValueError):
+        _hibp_invalidate_verification()
+        return False
+
+    safe_subscription = _safe_subscription_metadata(dict(subscription))
+    # Defense in depth: metadata is upstream-controlled, so avoid retaining a
+    # value equal to the supplied secret even under an otherwise safe field.
+    safe_subscription = {
+        field: value for field, value in safe_subscription.items() if value != api_key
+    }
+    global _hibp_verification_state
+    _hibp_verification_state = HIBPVerificationState(
+        key_fingerprint=fingerprint,
+        verified_at=verified_at,
+        subscription=safe_subscription,
+    )
+    return True
+
+
+def _hibp_is_verified(api_key: str | None, now: float | None = None) -> bool:
+    """Check current process-local verification state without any network I/O."""
+    fingerprint = _hibp_key_fingerprint(api_key)
+    state = _hibp_verification_state
+    if fingerprint is None or state.key_fingerprint != fingerprint or state.verified_at is None:
+        _hibp_invalidate_verification()
+        return False
+    try:
+        current_time = time.time() if now is None else float(now)
+    except (TypeError, ValueError):
+        return False
+    if current_time - state.verified_at > HIBP_VERIFICATION_TTL_SECONDS:
+        _hibp_invalidate_verification()
+        return False
+    return True
+
+
+def _hibp_configuration_state() -> dict[str, bool]:
+    """Expose local configuration/verification status without reading upstream."""
+    api_key = os.environ.get("HIBP_API_KEY")
+    return {
+        "configured": HIBPClient.validate_api_key(api_key),
+        "verified": _hibp_is_verified(api_key),
+    }
 
 
 def _dedupe_tool_categories(categories):
