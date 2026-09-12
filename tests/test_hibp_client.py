@@ -364,5 +364,56 @@ def test_subscribed_domains_rejects_object_json():
 
 def test_breached_domain_rejects_list_json():
     client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, [], {})))
-    result = client.breached_domain("example.test")
+    result = client.breached_domain("example.test", [{"DomainName": "example.test"}])
     assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
+
+
+def test_subscribed_domains_parses_documented_domain_records():
+    payload = [{"DomainName": "Example.org", "PwnCount": 3}, {"DomainName": "acme.test"}]
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, payload, {})))
+    result = client.subscribed_domains()
+    assert result.ok
+    assert result.data == [{"DomainName": "Example.org"}, {"DomainName": "acme.test"}]
+
+
+def test_subscribed_domains_rejects_non_list_json():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, "bad", {})))
+    result = client.subscribed_domains()
+    assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
+
+
+def test_breached_domain_requires_exact_normalized_subscribed_domain():
+    transport = FakeTransport(FakeResponse(200, {"PwnCount": 1}, {}))
+    client = HIBPClient("a" * 32, transport=transport)
+    result = client.breached_domain(" EXAMPLE.ORG. ", [{"DomainName": "example.org"}])
+    assert result.ok
+    assert transport.calls[0].url.endswith("/breachedDomain/example.org")
+
+    unauthorized = client.breached_domain("example.org.evil.test", [{"DomainName": "example.org"}])
+    assert not unauthorized.ok
+    assert unauthorized.error.category is HIBPErrorCategory.FORBIDDEN
+    assert len(transport.calls) == 1
+
+
+def test_breached_domain_does_not_call_upstream_when_unauthorized():
+    transport = FakeTransport(FakeResponse(200, {}, {}))
+    client = HIBPClient("a" * 32, transport=transport)
+    result = client.breached_domain("other.test", ["example.test"])
+    assert not result.ok
+    assert result.error.category is HIBPErrorCategory.FORBIDDEN
+    assert transport.calls == []
+
+
+def test_breached_domain_preserves_authoritative_403():
+    transport = FakeTransport(FakeResponse(403, {}, {}))
+    client = HIBPClient("a" * 32, transport=transport)
+    result = client.breached_domain("example.org.", [{"DomainName": "EXAMPLE.ORG"}])
+    assert result.error.category is HIBPErrorCategory.FORBIDDEN
+    assert result.status_code == 403
+
+
+def test_domain_lookup_has_no_verification_or_dns_workflow():
+    transport = FakeTransport(FakeResponse(200, {}, {}))
+    client = HIBPClient("a" * 32, transport=transport)
+    client.breached_domain("example.org", [{"DomainName": "example.org"}])
+    assert len(transport.calls) == 1

@@ -126,10 +126,35 @@ class HIBPClient:
         )
 
     def subscribed_domains(self) -> HIBPResult:
-        return self._get("subscribedDomains", expected_type=list)
+        result = self._get("subscribedDomains", expected_type=list)
+        if not result.ok:
+            return result
+        records = []
+        for record in result.data:
+            if not isinstance(record, dict) or not isinstance(record.get("DomainName"), str):
+                return self._error(
+                    HIBPErrorCategory.INVALID_RESPONSE,
+                    "HIBP returned an invalid response",
+                    result.status_code,
+                )
+            records.append({"DomainName": record["DomainName"]})
+        return HIBPResult(ok=True, data=records, status_code=result.status_code)
 
-    def breached_domain(self, domain: str) -> HIBPResult:
-        return self._get("breachedDomain/" + quote(domain.strip(), safe=""), expected_type=dict)
+    def breached_domain(self, domain: str, subscribed_domains: object = ()) -> HIBPResult:
+        normalized = _normalize_domain(domain)
+        authorized = {
+            _normalize_domain(item.get("DomainName"))
+            for item in subscribed_domains
+            if isinstance(item, dict) and isinstance(item.get("DomainName"), str)
+        }
+        authorized.update(
+            _normalize_domain(item)
+            for item in subscribed_domains
+            if isinstance(item, str)
+        )
+        if not normalized or normalized not in authorized:
+            return self._error(HIBPErrorCategory.FORBIDDEN, "Domain is not authorized")
+        return self._get("breachedDomain/" + quote(normalized, safe=""), expected_type=dict)
 
     def _get(self, path: str, *, expected_type: type[object], email_not_found: bool = False) -> HIBPResult:
         headers = {
@@ -218,3 +243,8 @@ def _safe_subscription_metadata(data: object) -> dict[str, object]:
         and isinstance(value, expected_type)
         and not (expected_type is int and isinstance(value, bool))
     }
+
+
+def _normalize_domain(domain: str) -> str:
+    normalized = domain.strip().lower()
+    return normalized[:-1] if normalized.endswith(".") else normalized
