@@ -51,6 +51,7 @@ class HIBPTransport(Protocol):
         *,
         headers: Mapping[str, str],
         timeout: tuple[float, float],
+        allow_redirects: bool,
     ) -> requests.Response: ...
 
 
@@ -121,7 +122,12 @@ class HIBPClient:
         }
         url = self.base_url + "/" + path
         try:
-            response = self.transport.get(url, headers=headers, timeout=self.timeout)
+            response = self.transport.get(
+                url,
+                headers=headers,
+                timeout=self.timeout,
+                allow_redirects=False,
+            )
         except requests.Timeout:
             return self._error(HIBPErrorCategory.NETWORK, "HIBP request timed out")
         except requests.RequestException:

@@ -24,9 +24,9 @@ class FakeTransport:
         self.error = error
         self.calls = []
 
-    def get(self, url, *, headers, timeout):
+    def get(self, url, *, headers, timeout, allow_redirects):
         self.calls.append(
-            type("Call", (), {"url": url, "headers": headers, "timeout": timeout})()
+            type("Call", (), {"url": url, "headers": headers, "timeout": timeout, "allow_redirects": allow_redirects})()
         )
         if self.error:
             raise self.error
@@ -76,6 +76,12 @@ def test_request_uses_https_base_url_and_finite_timeout(fake_transport):
     assert fake_transport.calls[0].timeout == (1.0, 2.0)
     with pytest.raises(ValueError):
         HIBPClient("a" * 32, base_url="http://example.test", transport=fake_transport)
+
+
+def test_requests_disable_redirects(fake_transport):
+    client = HIBPClient("a" * 32, transport=fake_transport)
+    client.subscription_status()
+    assert fake_transport.calls[0].allow_redirects is False
 
 
 def test_maps_401_without_echoing_api_key():
