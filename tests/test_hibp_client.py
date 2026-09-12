@@ -458,13 +458,15 @@ class FakeRouteClient:
     calls = []
 
     def __init__(self, api_key):
-        if not api_key:
+        if not self.validate_api_key(api_key):
             raise ValueError("missing key")
         self.calls.append(("init", api_key))
 
     @staticmethod
     def validate_api_key(api_key):
-        return bool(api_key)
+        return isinstance(api_key, str) and len(api_key) == 32 and all(
+            character in "0123456789abcdefABCDEF" for character in api_key
+        )
 
     def breached_account(self, email):
         self.calls.append(("email", email))
@@ -572,6 +574,27 @@ def test_route_action_verify_without_api_key_fails_closed(monkeypatch):
     assert response.status_code == 503
     assert response.get_json() == {"error": "HIBP API key is not configured"}
     assert not server._hibp_is_verified(None)
+
+
+@pytest.mark.parametrize("configured_key", [None, "malformed"])
+def test_route_action_non_verify_key_failure_preserves_verified_state(monkeypatch, configured_key):
+    verified_key = "a" * 32
+    monkeypatch.setattr(server, "HIBPClient", FakeRouteClient)
+    assert server._hibp_mark_verified(
+        verified_key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
+    if configured_key is None:
+        monkeypatch.delenv("HIBP_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("HIBP_API_KEY", configured_key)
+
+    response = server.app.test_client().post(
+        "/api/tools/have_i_been_pwned", json={"action": "email", "email": "person@example.test"}
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "HIBP API key is not configured"}
+    assert server._hibp_is_verified(verified_key)
 
 
 def test_route_action_verify_marks_only_safe_200_metadata(hibp_route):

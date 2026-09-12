@@ -9357,7 +9357,8 @@ def have_i_been_pwned():
     try:
         client = HIBPClient(api_key)
     except (TypeError, ValueError):
-        _hibp_invalidate_verification()
+        if action == "verify":
+            _hibp_invalidate_verification()
         return jsonify({"error": "HIBP API key is not configured"}), 503
 
     if action == "email":
