@@ -93,7 +93,17 @@ class HIBPClient:
         )
 
     def breached_account(self, email: str) -> HIBPResult:
-        return self._get("breachedAccount/" + quote(email.strip(), safe=""), expected_type=list, email_not_found=True)
+        normalized_email = email.strip()
+        if not normalized_email:
+            return self._error(
+                HIBPErrorCategory.INVALID_CONFIGURATION,
+                "HIBP email address is required",
+            )
+        return self._get(
+            "breachedAccount/" + quote(normalized_email, safe=""),
+            expected_type=list,
+            email_not_found=True,
+        )
 
     def subscription_status(self) -> HIBPResult:
         return self._get("subscription/status", expected_type=dict)

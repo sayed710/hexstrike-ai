@@ -142,6 +142,76 @@ def test_breached_account_rejects_object_json():
     assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
 
 
+def test_breached_account_trims_and_url_encodes_email():
+    transport = FakeTransport(FakeResponse(200, [], {}))
+    client = HIBPClient("a" * 32, transport=transport)
+
+    result = client.breached_account("  alice+lab@hibp-integration-tests.com  ")
+
+    assert result.ok
+    assert transport.calls[0].url.endswith(
+        "/breachedAccount/alice%2Blab%40hibp-integration-tests.com"
+    )
+
+
+def test_breached_account_parses_200_breach_collection():
+    breaches = [{"Name": "Example", "Title": "Example breach"}]
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, breaches, {})))
+
+    result = client.breached_account("alice@example.test")
+
+    assert result.ok
+    assert result.status_code == 200
+    assert result.data == breaches
+
+
+def test_breached_account_404_is_successful_no_breach():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(404, {}, {})))
+
+    result = client.breached_account("alice@example.test")
+
+    assert result.ok
+    assert result.not_found
+    assert result.data == []
+    assert result.status_code == 404
+
+
+def test_breached_account_rejects_empty_email_without_transport_call():
+    transport = FakeTransport(FakeResponse(200, [], {}))
+    client = HIBPClient("a" * 32, transport=transport)
+
+    result = client.breached_account("   ")
+
+    assert not result.ok
+    assert result.error.category is HIBPErrorCategory.INVALID_CONFIGURATION
+    assert transport.calls == []
+
+
+def test_breached_account_does_not_log_full_email(caplog):
+    email = "alice+lab@hibp-integration-tests.com"
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, [], {})))
+
+    with caplog.at_level("DEBUG"):
+        client.breached_account(email)
+
+    assert email not in caplog.text
+    assert "alice+lab" not in caplog.text
+
+
+def test_breached_account_does_not_persist_email_or_response(tmp_path, monkeypatch):
+    email = "alice+lab@hibp-integration-tests.com"
+    response = [{"Name": "Example"}]
+    transport = FakeTransport(FakeResponse(200, response, {}))
+    client = HIBPClient("a" * 32, transport=transport)
+    monkeypatch.chdir(tmp_path)
+
+    result = client.breached_account(email)
+
+    assert result.data == response
+    assert not list(tmp_path.iterdir())
+    assert email not in vars(client)
+
+
 def test_subscribed_domains_rejects_object_json():
     client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, {}, {})))
     result = client.subscribed_domains()
