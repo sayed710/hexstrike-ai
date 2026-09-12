@@ -116,6 +116,14 @@ def test_maps_403_to_forbidden_without_raw_response():
     assert "secret" not in str(result.error)
 
 
+def test_maps_400_to_invalid_configuration():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(400, {"detail": "bad request"}, {})))
+    result = client.subscription_status()
+    assert result.error.category is HIBPErrorCategory.INVALID_CONFIGURATION
+    assert result.status_code == 400
+    assert "bad request" not in str(result.error)
+
+
 def test_maps_429_to_rate_limit_and_preserves_retry_after_without_retrying():
     transport = FakeTransport(FakeResponse(429, {}, {"Retry-After": "17"}))
     client = HIBPClient("a" * 32, transport=transport)
@@ -165,9 +173,13 @@ def test_subscription_status_parses_safe_metadata():
         "Description": "Test subscription",
         "SubscribedUntil": "2027-01-01T00:00:00Z",
         "Rpm": 10,
-        "DomainSearches": 5,
-        "IncludeStealerLogs": True,
-        "IncludeAffiliateSearches": False,
+        "DomainSearchMaxBreachedAccounts": 5,
+        "MaxBreachedDomains": None,
+        "IncludesStealerLogs": True,
+        "IncludesBulkDomainAdd": False,
+        "IncludesAutoSubdomainVerification": True,
+        "IncludesCustomerDomains": False,
+        "IncludesKAnon": True,
         "Unexpected": "must not be retained",
     }
     client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, payload, {})))
@@ -181,9 +193,13 @@ def test_subscription_status_parses_safe_metadata():
         "Description": "Test subscription",
         "SubscribedUntil": "2027-01-01T00:00:00Z",
         "Rpm": 10,
-        "DomainSearches": 5,
-        "IncludeStealerLogs": True,
-        "IncludeAffiliateSearches": False,
+        "DomainSearchMaxBreachedAccounts": 5,
+        "MaxBreachedDomains": None,
+        "IncludesStealerLogs": True,
+        "IncludesBulkDomainAdd": False,
+        "IncludesAutoSubdomainVerification": True,
+        "IncludesCustomerDomains": False,
+        "IncludesKAnon": True,
     }
 
 
@@ -235,6 +251,17 @@ def test_verification_rejects_empty_or_unknown_only_metadata(subscription):
     key = "b" * 32
 
     assert not server._hibp_mark_verified(key, subscription=subscription, status_code=200)
+    assert not server._hibp_is_verified(key)
+
+
+def test_verification_requires_subscription_name_for_structural_validity():
+    key = "b" * 32
+
+    assert not server._hibp_mark_verified(
+        key,
+        subscription={"MaxBreachedDomains": None},
+        status_code=200,
+    )
     assert not server._hibp_is_verified(key)
 
 
@@ -584,10 +611,10 @@ class FakeRouteClient:
     results = {}
     calls = []
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, user_agent=None):
         if not self.validate_api_key(api_key):
             raise ValueError("missing key")
-        self.calls.append(("init", api_key))
+        self.calls.append(("init", api_key, user_agent))
 
     @staticmethod
     def validate_api_key(api_key):
@@ -680,8 +707,15 @@ def test_route_action_email_404_is_no_breaches_200(hibp_route):
 
 
 def test_route_action_subscription_status_returns_only_safe_metadata(hibp_route):
+    api_key = "a" * 32
     FakeRouteClient.results["subscription_status"] = FakeRouteResult(
-        True, {"SubscriptionName": "Pwned 1", "Rpm": 10, "Unexpected": "secret"}
+        True,
+        {
+            "SubscriptionName": "Pwned 1",
+            "Rpm": 10,
+            "Description": f"echoed secret {api_key}",
+            "Unexpected": "secret",
+        },
     )
 
     response = hibp_route.post("/api/tools/have_i_been_pwned", json={"action": "subscription_status"})
@@ -690,6 +724,18 @@ def test_route_action_subscription_status_returns_only_safe_metadata(hibp_route)
     assert response.get_json() == {
         "action": "subscription_status", "subscription": {"SubscriptionName": "Pwned 1", "Rpm": 10}
     }
+    assert api_key not in response.get_data(as_text=True)
+
+
+def test_route_passes_non_secret_user_agent_environment_to_client(hibp_route, monkeypatch):
+    monkeypatch.setenv("HIBP_USER_AGENT", "Operations-Agent/2.0")
+
+    response = hibp_route.post(
+        "/api/tools/have_i_been_pwned", json={"action": "subscription_status"}
+    )
+
+    assert response.status_code == 200
+    assert FakeRouteClient.calls[0] == ("init", "a" * 32, "Operations-Agent/2.0")
 
 
 def test_route_action_verify_without_api_key_fails_closed(monkeypatch):
@@ -725,8 +771,15 @@ def test_route_action_non_verify_key_failure_preserves_verified_state(monkeypatc
 
 
 def test_route_action_verify_marks_only_safe_200_metadata(hibp_route):
+    api_key = "a" * 32
     FakeRouteClient.results["subscription_status"] = FakeRouteResult(
-        True, {"SubscriptionName": "Pwned 1", "Unexpected": "secret"}, 200
+        True,
+        {
+            "SubscriptionName": "Pwned 1",
+            "Description": f"echoed secret {api_key}",
+            "Unexpected": "secret",
+        },
+        200,
     )
 
     response = hibp_route.post("/api/tools/have_i_been_pwned", json={"action": "verify"})
@@ -735,6 +788,7 @@ def test_route_action_verify_marks_only_safe_200_metadata(hibp_route):
     assert response.get_json() == {
         "action": "verify", "verified": True, "subscription": {"SubscriptionName": "Pwned 1"}
     }
+    assert api_key not in response.get_data(as_text=True)
     assert server._hibp_is_verified("a" * 32)
 
 
@@ -769,9 +823,9 @@ def test_route_domain_authorization_removes_only_one_trailing_dot():
 @pytest.mark.parametrize(
     ("category", "status_code", "expected_status", "message"),
     [
+        (HIBPErrorCategory.INVALID_CONFIGURATION, 400, 400, "Invalid HIBP request"),
         (HIBPErrorCategory.AUTHENTICATION, 401, 401, "HIBP authentication failed"),
         (HIBPErrorCategory.FORBIDDEN, 403, 403, "HIBP request was forbidden"),
-        (HIBPErrorCategory.RATE_LIMITED, 429, 429, "HIBP rate limit exceeded"),
         (HIBPErrorCategory.UPSTREAM, 503, 502, "HIBP service is unavailable"),
     ],
 )
@@ -786,6 +840,20 @@ def test_route_action_maps_upstream_errors_to_safe_responses(
 
     assert response.status_code == expected_status
     assert response.get_json() == {"error": message}
+
+
+def test_route_action_rate_limit_preserves_retry_after_metadata(hibp_route):
+    FakeRouteClient.results["email"] = _route_error(HIBPErrorCategory.RATE_LIMITED, 429)
+
+    response = hibp_route.post(
+        "/api/tools/have_i_been_pwned", json={"action": "email", "email": "person@example.test"}
+    )
+
+    assert response.status_code == 429
+    assert response.get_json() == {
+        "error": "HIBP rate limit exceeded",
+        "retry_after_seconds": 7,
+    }
 
 
 def test_route_action_never_logs_full_email_or_api_key(hibp_route, caplog, monkeypatch):

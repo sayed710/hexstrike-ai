@@ -19,9 +19,13 @@ _SAFE_SUBSCRIPTION_FIELDS = {
     "Description": str,
     "SubscribedUntil": str,
     "Rpm": int,
-    "DomainSearches": int,
-    "IncludeStealerLogs": bool,
-    "IncludeAffiliateSearches": bool,
+    "DomainSearchMaxBreachedAccounts": int,
+    "MaxBreachedDomains": int,
+    "IncludesStealerLogs": bool,
+    "IncludesBulkDomainAdd": bool,
+    "IncludesAutoSubdomainVerification": bool,
+    "IncludesCustomerDomains": bool,
+    "IncludesKAnon": bool,
 }
 
 
@@ -121,7 +125,7 @@ class HIBPClient:
             return result
         return HIBPResult(
             ok=True,
-            data=_safe_subscription_metadata(result.data),
+            data=_safe_subscription_metadata(result.data, secret=self.api_key),
             status_code=result.status_code,
         )
 
@@ -187,6 +191,12 @@ class HIBPClient:
             return self._error(HIBPErrorCategory.NETWORK, "HIBP network request failed")
 
         status_code = response.status_code
+        if status_code == 400:
+            return self._error(
+                HIBPErrorCategory.INVALID_CONFIGURATION,
+                "HIBP request was invalid",
+                status_code,
+            )
         if status_code == 401:
             return self._error(HIBPErrorCategory.AUTHENTICATION, "HIBP authentication failed", status_code)
         if status_code == 403:
@@ -244,17 +254,29 @@ class HIBPClient:
         )
 
 
-def _safe_subscription_metadata(data: object) -> dict[str, object]:
+def _safe_subscription_metadata(data: object, *, secret: str | None = None) -> dict[str, object]:
     """Retain only documented, non-secret subscription metadata."""
     if not isinstance(data, dict):
         return {}
-    return {
-        field: value
-        for field, expected_type in _SAFE_SUBSCRIPTION_FIELDS.items()
-        if (value := data.get(field)) is not None
-        and isinstance(value, expected_type)
-        and not (expected_type is int and isinstance(value, bool))
-    }
+    safe: dict[str, object] = {}
+    for field, expected_type in _SAFE_SUBSCRIPTION_FIELDS.items():
+        if field not in data:
+            continue
+        value = data[field]
+        # HIBP documents MaxBreachedDomains as nullable when the plan has no
+        # domain-search allowance. Preserve that documented null value.
+        if value is None:
+            if field == "MaxBreachedDomains":
+                safe[field] = None
+            continue
+        if not isinstance(value, expected_type):
+            continue
+        if expected_type is int and isinstance(value, bool):
+            continue
+        if secret and isinstance(value, str) and secret in value:
+            continue
+        safe[field] = value
+    return safe
 
 
 def _normalize_domain(domain: object) -> str | None:

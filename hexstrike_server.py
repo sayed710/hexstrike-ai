@@ -9147,15 +9147,9 @@ def _hibp_mark_verified(
         _hibp_invalidate_verification()
         return False
 
-    safe_subscription = _safe_subscription_metadata(dict(subscription))
-    # Defense in depth: metadata is upstream-controlled, so avoid retaining a
-    # string containing the supplied secret even under an otherwise safe field.
-    safe_subscription = {
-        field: value
-        for field, value in safe_subscription.items()
-        if not (isinstance(value, str) and api_key in value)
-    }
-    if not safe_subscription:
+    safe_subscription = _safe_subscription_metadata(dict(subscription), secret=api_key)
+    subscription_name = safe_subscription.get("SubscriptionName")
+    if not isinstance(subscription_name, str) or not subscription_name.strip():
         _hibp_invalidate_verification()
         return False
     global _hibp_verification_state
@@ -9367,7 +9361,16 @@ def _hibp_error_response(result):
         "rate_limited": (429, "HIBP rate limit exceeded"),
     }
     status_code, message = responses.get(category, (502, "HIBP service is unavailable"))
-    return jsonify({"error": message}), status_code
+    payload = {"error": message}
+    retry_after_seconds = getattr(error, "retry_after_seconds", None)
+    if (
+        category == "rate_limited"
+        and isinstance(retry_after_seconds, int)
+        and not isinstance(retry_after_seconds, bool)
+        and retry_after_seconds >= 0
+    ):
+        payload["retry_after_seconds"] = retry_after_seconds
+    return jsonify(payload), status_code
 
 
 def _hibp_authorizes_domain(domain, subscribed_domains):
@@ -9410,7 +9413,7 @@ def have_i_been_pwned():
 
     api_key = os.environ.get("HIBP_API_KEY")
     try:
-        client = HIBPClient(api_key)
+        client = HIBPClient(api_key, user_agent=os.environ.get("HIBP_USER_AGENT"))
     except (TypeError, ValueError):
         if action == "verify":
             _hibp_invalidate_verification()
@@ -9432,7 +9435,7 @@ def have_i_been_pwned():
             return _hibp_error_response(result)
         return jsonify({
             "action": "subscription_status",
-            "subscription": _safe_subscription_metadata(result.data),
+            "subscription": _safe_subscription_metadata(result.data, secret=api_key),
         })
 
     if action == "subscribed_domains":
@@ -9458,7 +9461,7 @@ def have_i_been_pwned():
 
     # Only the explicit verify action is allowed to alter verification state.
     result = client.subscription_status()
-    safe_metadata = _safe_subscription_metadata(result.data) if result.ok else {}
+    safe_metadata = _safe_subscription_metadata(result.data, secret=api_key) if result.ok else {}
     if (
         result.ok
         and result.status_code == 200
