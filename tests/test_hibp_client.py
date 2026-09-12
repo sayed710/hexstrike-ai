@@ -128,3 +128,27 @@ def test_error_strings_never_contain_api_key():
     client = HIBPClient(key, transport=FakeTransport(error=requests.RequestException(key)))
     result = client.subscription_status()
     assert key not in str(result.error)
+
+
+def test_subscription_status_rejects_list_json():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, [], {})))
+    result = client.subscription_status()
+    assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
+
+
+def test_breached_account_rejects_object_json():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, {}, {})))
+    result = client.breached_account("person@example.test")
+    assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
+
+
+def test_subscribed_domains_rejects_object_json():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, {}, {})))
+    result = client.subscribed_domains()
+    assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE
+
+
+def test_breached_domain_rejects_list_json():
+    client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, [], {})))
+    result = client.breached_domain("example.test")
+    assert result.error.category is HIBPErrorCategory.INVALID_RESPONSE

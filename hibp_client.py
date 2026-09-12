@@ -93,18 +93,18 @@ class HIBPClient:
         )
 
     def breached_account(self, email: str) -> HIBPResult:
-        return self._get("breachedAccount/" + quote(email.strip(), safe=""), email_not_found=True)
+        return self._get("breachedAccount/" + quote(email.strip(), safe=""), expected_type=list, email_not_found=True)
 
     def subscription_status(self) -> HIBPResult:
-        return self._get("subscription/status")
+        return self._get("subscription/status", expected_type=dict)
 
     def subscribed_domains(self) -> HIBPResult:
-        return self._get("subscribedDomains")
+        return self._get("subscribedDomains", expected_type=list)
 
     def breached_domain(self, domain: str) -> HIBPResult:
-        return self._get("breachedDomain/" + quote(domain.strip(), safe=""))
+        return self._get("breachedDomain/" + quote(domain.strip(), safe=""), expected_type=dict)
 
-    def _get(self, path: str, *, email_not_found: bool = False) -> HIBPResult:
+    def _get(self, path: str, *, expected_type: type[object], email_not_found: bool = False) -> HIBPResult:
         headers = {
             "hibp-api-key": self.api_key,
             "user-agent": self.user_agent,
@@ -144,7 +144,7 @@ class HIBPClient:
                 "HIBP returned an invalid response",
                 status_code,
             )
-        if not isinstance(data, (dict, list)):
+        if not isinstance(data, expected_type):
             return self._error(
                 HIBPErrorCategory.INVALID_RESPONSE,
                 "HIBP returned an invalid response",
