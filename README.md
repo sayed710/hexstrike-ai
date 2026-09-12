@@ -212,6 +212,23 @@ curl -X POST http://localhost:8888/api/intelligence/analyze-target \
   -d '{"target": "example.com", "analysis_type": "comprehensive"}'
 ```
 
+### Optional HIBP Integration
+
+Have I Been Pwned (HIBP) is an optional external integration; core HexStrike
+functionality does not require it. Production breached-account access requires
+an external HIBP subscription and a valid `HIBP_API_KEY`, supplied only through
+the environment. Never commit or log that key.
+
+Without a paid, valid subscription key, an honest `/health` result may be
+`119/120` with only `have-i-been-pwned` unavailable. This is expected and does
+not mean the local HexStrike installation is broken. The official HIBP public
+test facility can validate integration behavior, but it is not a production
+subscription and cannot verify subscription status.
+
+`/health` does not perform external HIBP verification. HIBP becomes available
+only after an explicit successful subscription verification. Verification state
+is process-local and TTL-bounded, so it may need to be repeated after restart.
+
 ---
 
 ## AI Client Integration Setup
