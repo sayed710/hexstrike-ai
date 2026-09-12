@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from collections import OrderedDict
 import shutil
+import stat
 import venv
 import zipfile
 from pathlib import Path
@@ -3552,7 +3553,7 @@ class CTFToolManager:
             "strings": "strings -n 8",
             "hexdump": "hexdump -C",
             "pwninit": "pwninit",
-            "libc-database": "python3 /opt/libc-database/find.py",
+            "libc-database": "/opt/libc-database/find",
 
             # Forensics Investigation Tools
             "binwalk": "binwalk -e --dd='.*'",
@@ -3566,7 +3567,7 @@ class CTFToolManager:
             "outguess": "outguess -r",
             "jsteg": "jsteg reveal",
             "volatility": "volatility -f {} imageinfo",
-            "volatility3": "python3 /opt/volatility3/vol.py -f",
+            "volatility3": "vol -f",
             "rekall": "rekall -f",
             "wireshark": "tshark -r",
             "tcpdump": "tcpdump -r",
@@ -9018,6 +9019,104 @@ class FileOperationsManager:
 # Global file operations manager
 file_manager = FileOperationsManager()
 
+# Health detection is intentionally separate from command execution.  Labels
+# are user-facing capability names, while the installed entrypoints may use a
+# different spelling or belong to a suite rather than a single executable.
+TOOL_ALIASES = {
+    "bulk-extractor": ("bulk-extractor", "bulk_extractor"),
+    "censys-cli": ("censys-cli", "censys"),
+    "exploit-db": ("exploit-db", "searchsploit"),
+    "one-gadget": ("one-gadget", "one_gadget"),
+    "pwntools": ("pwntools", "pwn"),
+    "ropgadget": ("ropgadget", "ROPgadget"),
+    "scout-suite": ("scout-suite", "scout"),
+    "shodan-cli": ("shodan-cli", "shodan"),
+    # This is specifically Volatility 3.  Do not alias the separate
+    # "volatility" label, which historically refers to Volatility 2.
+    "volatility3": ("volatility3", "vol"),
+}
+
+# These raw entrypoints are represented by one user-facing capability label
+# in health totals. They remain available to command mappings elsewhere.
+TOOL_CANONICAL_LABELS = {
+    "vol": "volatility3",
+    "searchsploit": "exploit-db",
+    "msfconsole": "metasploit",
+    "msfvenom": "metasploit",
+}
+
+TOOL_SUITE_SENTINELS = {
+    "metasploit": ("msfconsole", "msfvenom"),
+    "sleuthkit": ("fls", "tsk_recover"),
+}
+
+TOOL_FILE_SENTINELS = {
+    "hashcat-utils": ("/usr/lib/hashcat-utils/cap2hccapx.bin",),
+}
+
+TOOL_PATH_SENTINELS = {
+    "libc-database": ("/opt/libc-database/find",),
+}
+
+# These names describe optional APIs/capabilities, not local executables.
+NON_EXECUTABLE_TOOL_LABELS = frozenset({
+    "api-schema-analyzer",
+    "graphql-scanner",
+    "have-i-been-pwned",
+    "jwt-analyzer",
+})
+
+
+def _dedupe_tool_categories(categories):
+    """Keep the first category occurrence of each capability label."""
+    seen = set()
+    deduped = {}
+    for category, tools in categories.items():
+        unique_tools = []
+        for tool in tools:
+            canonical_label = TOOL_CANONICAL_LABELS.get(tool, tool)
+            if canonical_label in seen:
+                continue
+            seen.add(canonical_label)
+            unique_tools.append(canonical_label)
+        deduped[category] = unique_tools
+    return deduped
+
+
+def _is_executable_file(path):
+    """Return whether path is an executable regular file."""
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(metadata.st_mode):
+        return False
+    executable_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    return bool(metadata.st_mode & executable_bits) and os.access(path, os.X_OK)
+
+
+def _tool_is_available(tool, executable_finder=None, executable_file_checker=None):
+    """Detect one capability using local executable/file metadata only."""
+    executable_finder = executable_finder or shutil.which
+    executable_file_checker = executable_file_checker or _is_executable_file
+
+    if tool in NON_EXECUTABLE_TOOL_LABELS:
+        return False
+    def path_is_executable(candidate):
+        resolved_path = executable_finder(candidate)
+        return bool(resolved_path) and executable_file_checker(os.path.realpath(resolved_path))
+
+    if tool in TOOL_ALIASES:
+        return any(path_is_executable(candidate) for candidate in TOOL_ALIASES[tool])
+    if tool in TOOL_SUITE_SENTINELS:
+        return any(path_is_executable(candidate) for candidate in TOOL_SUITE_SENTINELS[tool])
+    if tool in TOOL_FILE_SENTINELS:
+        return any(executable_file_checker(path) for path in TOOL_FILE_SENTINELS[tool])
+    if tool in TOOL_PATH_SENTINELS:
+        return any(executable_file_checker(path) for path in TOOL_PATH_SENTINELS[tool])
+    return path_is_executable(tool)
+
+
 # API Routes
 
 @app.route("/health", methods=["GET"])
@@ -9088,19 +9187,39 @@ def health_check():
         "msfvenom", "msfconsole", "graphql-scanner", "jwt-analyzer"
     ]
 
-    all_tools = (
-        essential_tools + network_tools + web_security_tools + vuln_scanning_tools +
-        password_tools + binary_tools + forensics_tools + cloud_tools +
-        osint_tools + exploitation_tools + api_tools + wireless_tools + additional_tools
-    )
+    category_tools = _dedupe_tool_categories({
+        "essential": essential_tools,
+        "network": network_tools,
+        "web_security": web_security_tools,
+        "vuln_scanning": vuln_scanning_tools,
+        "password": password_tools,
+        "binary": binary_tools,
+        "forensics": forensics_tools,
+        "cloud": cloud_tools,
+        "osint": osint_tools,
+        "exploitation": exploitation_tools,
+        "api": api_tools,
+        "wireless": wireless_tools,
+        "additional": additional_tools,
+    })
+    essential_tools = category_tools["essential"]
+    network_tools = category_tools["network"]
+    web_security_tools = category_tools["web_security"]
+    vuln_scanning_tools = category_tools["vuln_scanning"]
+    password_tools = category_tools["password"]
+    binary_tools = category_tools["binary"]
+    forensics_tools = category_tools["forensics"]
+    cloud_tools = category_tools["cloud"]
+    osint_tools = category_tools["osint"]
+    exploitation_tools = category_tools["exploitation"]
+    api_tools = category_tools["api"]
+    wireless_tools = category_tools["wireless"]
+    additional_tools = category_tools["additional"]
+    all_tools = [tool for tools in category_tools.values() for tool in tools]
     tools_status = {}
 
     for tool in all_tools:
-        try:
-            result = execute_command(f"which {tool}", use_cache=True)
-            tools_status[tool] = result["success"]
-        except:
-            tools_status[tool] = False
+        tools_status[tool] = _tool_is_available(tool)
 
     all_essential_tools_available = all(tools_status[tool] for tool in essential_tools)
 
