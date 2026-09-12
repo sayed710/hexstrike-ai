@@ -9061,6 +9061,8 @@ TOOL_FILE_SENTINELS = {
 }
 
 TOOL_PATH_SENTINELS = {
+    # The authorized user-local Falco installation lives outside PATH.
+    "falco": ("/home/hexstrike/.local/falco-0.44.1-x86_64/usr/bin/falco",),
     "libc-database": ("/opt/libc-database/find",),
 }
 
@@ -9332,7 +9334,10 @@ def _tool_is_available(tool, executable_finder=None, executable_file_checker=Non
     if tool in TOOL_FILE_SENTINELS:
         return any(executable_file_checker(path) for path in TOOL_FILE_SENTINELS[tool])
     if tool in TOOL_PATH_SENTINELS:
-        return any(executable_file_checker(path) for path in TOOL_PATH_SENTINELS[tool])
+        if any(executable_file_checker(path) for path in TOOL_PATH_SENTINELS[tool]):
+            return True
+        if tool != "falco":
+            return False
     if tool in TOOL_JAR_SENTINELS:
         return any(_is_jar_file(path, main_class) for path, main_class in TOOL_JAR_SENTINELS[tool])
     if tool in TOOL_PYTHON_PACKAGE_SENTINELS:

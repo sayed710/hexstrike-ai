@@ -255,6 +255,87 @@ def test_path_detection_validates_realpath_target(server, tmp_path):
     ) is False
 
 
+FALCO_SENTINEL = "/home/hexstrike/.local/falco-0.44.1-x86_64/usr/bin/falco"
+
+
+def test_falco_detection_uses_explicit_sentinel_when_not_on_path(server):
+    def checker(path):
+        return path == FALCO_SENTINEL
+
+    assert server._tool_is_available(
+        "falco",
+        executable_finder=lambda name: None,
+        executable_file_checker=checker,
+    ) is True
+
+
+def test_falco_detection_fails_closed_for_missing_sentinel(server, monkeypatch, tmp_path):
+    missing = tmp_path / "falco"
+    monkeypatch.setattr(server, "TOOL_PATH_SENTINELS", {"falco": (str(missing),)})
+
+    assert server._tool_is_available(
+        "falco",
+        executable_finder=lambda name: None,
+    ) is False
+
+
+def test_falco_detection_fails_closed_for_non_executable_sentinel(server, monkeypatch, tmp_path):
+    non_executable = tmp_path / "falco"
+    non_executable.write_text("not executable", encoding="utf-8")
+    non_executable.chmod(0o644)
+    monkeypatch.setattr(server, "TOOL_PATH_SENTINELS", {"falco": (str(non_executable),)})
+
+    assert server._tool_is_available(
+        "falco",
+        executable_finder=lambda name: None,
+    ) is False
+
+
+def test_falco_detection_fails_closed_for_directory_sentinel(server, monkeypatch, tmp_path):
+    sentinel_directory = tmp_path / "falco"
+    sentinel_directory.mkdir()
+    monkeypatch.setattr(server, "TOOL_PATH_SENTINELS", {"falco": (str(sentinel_directory),)})
+
+    assert server._tool_is_available(
+        "falco",
+        executable_finder=lambda name: None,
+    ) is False
+
+
+def test_falco_sentinel_rejects_symlink(server, monkeypatch, tmp_path):
+    target = tmp_path / "falco-target"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    symlink = tmp_path / "falco"
+    symlink.symlink_to(target)
+    monkeypatch.setattr(server, "TOOL_PATH_SENTINELS", {"falco": (str(symlink),)})
+
+    assert server._tool_is_available(
+        "falco",
+        executable_finder=lambda name: None,
+    ) is False
+
+
+def test_falco_path_detection_remains_a_valid_fallback(server):
+    path_entry = "/tmp/falco-from-path"
+
+    assert server._tool_is_available(
+        "falco",
+        executable_finder=lambda name: path_entry,
+        executable_file_checker=lambda path: path == path_entry,
+    ) is True
+
+
+def test_libc_database_path_sentinel_does_not_gain_path_fallback(server):
+    path_entry = "/tmp/libc-database-from-path"
+
+    assert server._tool_is_available(
+        "libc-database",
+        executable_finder=lambda name: path_entry,
+        executable_file_checker=lambda path: path == path_entry,
+    ) is False
+
+
 def test_hashcat_utils_requires_an_executable_sentinel(server):
     assert server._tool_is_available(
         "hashcat-utils",
