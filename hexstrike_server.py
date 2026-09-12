@@ -9369,7 +9369,9 @@ def _hibp_authorizes_domain(domain, subscribed_domains):
     """Check the already-returned subscription records without extra lookup work."""
     if not isinstance(domain, str) or not isinstance(subscribed_domains, list):
         return False
-    normalized = domain.strip().lower().rstrip(".")
+    normalized = domain.strip().lower()
+    if normalized.endswith("."):
+        normalized = normalized[:-1]
     if not normalized:
         return False
     for record in subscribed_domains:
@@ -9378,7 +9380,10 @@ def _hibp_authorizes_domain(domain, subscribed_domains):
         candidate = record.get("DomainName")
         if not isinstance(candidate, str):
             return False
-        if candidate.strip().lower().rstrip(".") == normalized:
+        normalized_candidate = candidate.strip().lower()
+        if normalized_candidate.endswith("."):
+            normalized_candidate = normalized_candidate[:-1]
+        if normalized_candidate == normalized:
             return True
     return False
 

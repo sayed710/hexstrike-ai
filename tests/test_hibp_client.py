@@ -755,6 +755,15 @@ def test_route_action_domain_unsubscribed_does_not_lookup_domain(hibp_route):
     assert [call[0] for call in FakeRouteClient.calls] == ["init", "subscribed_domains"]
 
 
+def test_route_domain_authorization_removes_only_one_trailing_dot():
+    assert server._hibp_authorizes_domain(
+        "example.org.", [{"DomainName": "example.org"}]
+    )
+    assert not server._hibp_authorizes_domain(
+        "example.org..", [{"DomainName": "example.org"}]
+    )
+
+
 @pytest.mark.parametrize(
     ("category", "status_code", "expected_status", "message"),
     [
