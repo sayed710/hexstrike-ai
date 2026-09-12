@@ -9123,10 +9123,16 @@ def _hibp_mark_verified(
     api_key: str | None,
     now: float | None = None,
     subscription: Mapping[str, object] | None = None,
+    *,
+    status_code: int | None = None,
 ) -> bool:
     """Record successful explicit verification using only non-secret state."""
     fingerprint = _hibp_key_fingerprint(api_key)
-    if fingerprint is None or not isinstance(subscription, Mapping):
+    if (
+        fingerprint is None
+        or status_code != 200
+        or not isinstance(subscription, Mapping)
+    ):
         _hibp_invalidate_verification()
         return False
     try:
@@ -9137,10 +9143,15 @@ def _hibp_mark_verified(
 
     safe_subscription = _safe_subscription_metadata(dict(subscription))
     # Defense in depth: metadata is upstream-controlled, so avoid retaining a
-    # value equal to the supplied secret even under an otherwise safe field.
+    # string containing the supplied secret even under an otherwise safe field.
     safe_subscription = {
-        field: value for field, value in safe_subscription.items() if value != api_key
+        field: value
+        for field, value in safe_subscription.items()
+        if not (isinstance(value, str) and api_key in value)
     }
+    if not safe_subscription:
+        _hibp_invalidate_verification()
+        return False
     global _hibp_verification_state
     _hibp_verification_state = HIBPVerificationState(
         key_fingerprint=fingerprint,

@@ -192,7 +192,7 @@ def test_mark_verified_records_only_fingerprint_and_timestamp(monkeypatch):
     subscription = {"SubscriptionName": "Pwned 1", "Rpm": 10}
     monkeypatch.setattr(server.time, "time", lambda: 1000.0)
 
-    assert server._hibp_mark_verified(key, subscription=subscription)
+    assert server._hibp_mark_verified(key, subscription=subscription, status_code=200)
 
     state = server._hibp_verification_state
     assert state.key_fingerprint == server._hibp_key_fingerprint(key)
@@ -201,22 +201,33 @@ def test_mark_verified_records_only_fingerprint_and_timestamp(monkeypatch):
     assert key not in vars(state).values()
 
 
-def test_failed_verification_does_not_mark_verified():
+@pytest.mark.parametrize("status_code", [401, 503])
+def test_failed_verification_does_not_mark_verified(status_code):
     key = "b" * 32
-    failed_result = HIBPClient(
-        key, transport=FakeTransport(FakeResponse(401, {}, {}))
-    ).subscription_status()
 
-    if failed_result.ok and failed_result.status_code == 200 and isinstance(failed_result.data, dict):
-        server._hibp_mark_verified(key, subscription=failed_result.data)
+    assert not server._hibp_mark_verified(
+        key,
+        subscription={"SubscriptionName": "Pwned 1"},
+        status_code=status_code,
+    )
 
+    assert not server._hibp_is_verified(key)
+
+
+@pytest.mark.parametrize("subscription", [{}, {"Unexpected": "not metadata"}])
+def test_verification_rejects_empty_or_unknown_only_metadata(subscription):
+    key = "b" * 32
+
+    assert not server._hibp_mark_verified(key, subscription=subscription, status_code=200)
     assert not server._hibp_is_verified(key)
 
 
 def test_expired_verification_is_not_verified(monkeypatch):
     key = "c" * 32
     monkeypatch.setattr(server.time, "time", lambda: 1000.0)
-    assert server._hibp_mark_verified(key, subscription={"SubscriptionName": "Pwned 1"})
+    assert server._hibp_mark_verified(
+        key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
 
     monkeypatch.setattr(
         server.time,
@@ -231,7 +242,9 @@ def test_changed_api_key_invalidates_prior_verification(monkeypatch):
     original_key = "d" * 32
     changed_key = "e" * 32
     monkeypatch.setattr(server.time, "time", lambda: 1000.0)
-    assert server._hibp_mark_verified(original_key, subscription={"SubscriptionName": "Pwned 1"})
+    assert server._hibp_mark_verified(
+        original_key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
 
     assert not server._hibp_is_verified(changed_key)
     assert not server._hibp_is_verified(original_key)
@@ -241,10 +254,30 @@ def test_verification_state_never_contains_raw_api_key(monkeypatch):
     key = "f" * 32
     monkeypatch.setattr(server.time, "time", lambda: 1000.0)
 
-    assert server._hibp_mark_verified(key, subscription={"SubscriptionName": "Pwned 1"})
+    assert server._hibp_mark_verified(
+        key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
 
     assert key not in vars(server._hibp_verification_state).values()
     assert key not in repr(server._hibp_verification_state)
+
+
+def test_verification_state_drops_metadata_containing_raw_api_key(monkeypatch):
+    key = "0" * 32
+    monkeypatch.setattr(server.time, "time", lambda: 1000.0)
+
+    assert server._hibp_mark_verified(
+        key,
+        subscription={
+            "SubscriptionName": "Pwned 1",
+            "Description": f"hostile metadata {key} must be discarded",
+        },
+        status_code=200,
+    )
+
+    state = server._hibp_verification_state
+    assert state.subscription == {"SubscriptionName": "Pwned 1"}
+    assert key not in repr(state)
 
 
 def test_breached_account_rejects_object_json():
