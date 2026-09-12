@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 
 import pytest
 import requests
@@ -52,6 +53,19 @@ def test_client_rejects_malformed_api_key():
 def test_client_accepts_32_hex_api_key():
     assert HIBPClient.validate_api_key("aBcD" * 8)
     HIBPClient("aBcD" * 8)
+
+
+def test_official_hibp_test_account_lookup_is_opt_in():
+    if os.environ.get("HIBP_RUN_OFFICIAL_TESTS") != "1":
+        pytest.skip("official HIBP test-facility checks are opt-in")
+
+    # HIBP documents this key and address specifically for its test facility.
+    result = HIBPClient("0" * 32).breached_account("hibp-integration-tests.com")
+
+    # The facility's response is intentionally treated only as an HTTP result;
+    # neither the address nor the response body is logged or persisted.
+    assert result.status_code is not None
+    assert 100 <= result.status_code <= 599
 
 
 def test_request_headers_include_api_key_and_default_user_agent(fake_transport):
