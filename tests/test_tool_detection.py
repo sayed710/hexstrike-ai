@@ -352,13 +352,25 @@ def test_stegsolve_jar_sentinel_rejects_invalid_paths(server, monkeypatch, tmp_p
     assert server._tool_is_available("stegsolve") is False
 
 
-@pytest.mark.parametrize("label", ["have-i-been-pwned"])
-def test_non_local_labels_remain_unavailable(server, label):
+def test_hibp_detection_requires_registered_integration_not_a_path(server, monkeypatch):
+    key = "a" * 32
+    monkeypatch.setenv("HIBP_API_KEY", key)
+    monkeypatch.setattr(server, "_hibp_is_verified", lambda value: value == key)
+
     assert server._tool_is_available(
-        label,
+        "have-i-been-pwned",
         executable_finder=lambda name: "/tmp/fake-executable",
         executable_file_checker=lambda path: True,
-    ) is False
+    ) is True
+
+    monkeypatch.setattr(server.app, "url_map", SimpleNamespace(iter_rules=lambda: iter(())))
+    assert server._tool_is_available("have-i-been-pwned") is False
+
+
+def test_hibp_detection_requires_a_registered_client(server, monkeypatch):
+    monkeypatch.setattr(server, "HIBPClient", None)
+
+    assert server._tool_is_available("have-i-been-pwned") is False
 
 
 def test_health_totals_and_labels_are_unique(server, monkeypatch):

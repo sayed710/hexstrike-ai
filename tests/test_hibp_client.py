@@ -280,6 +280,116 @@ def test_verification_state_drops_metadata_containing_raw_api_key(monkeypatch):
     assert key not in repr(state)
 
 
+def _health_hibp_status():
+    return server.app.test_client().get("/health").get_json()
+
+
+@pytest.mark.parametrize("api_key", [None, "not-a-key"])
+def test_health_reports_hibp_unavailable_without_a_valid_key(monkeypatch, api_key):
+    if api_key is None:
+        monkeypatch.delenv("HIBP_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("HIBP_API_KEY", api_key)
+
+    payload = _health_hibp_status()
+
+    assert payload["tools_status"]["have-i-been-pwned"] is False
+    assert payload["hibp"] == {
+        "integration_present": True,
+        "configured": False,
+        "verified": False,
+        "verification_age_seconds": None,
+    }
+
+
+def test_health_reports_valid_but_never_verified_hibp_key_as_unavailable(monkeypatch):
+    monkeypatch.setenv("HIBP_API_KEY", "a" * 32)
+
+    payload = _health_hibp_status()
+
+    assert payload["tools_status"]["have-i-been-pwned"] is False
+    assert payload["hibp"]["configured"] is True
+    assert payload["hibp"]["verified"] is False
+    assert payload["hibp"]["verification_age_seconds"] is None
+
+
+def test_health_reports_hibp_after_successful_subscription_verification(monkeypatch):
+    key = "b" * 32
+    monkeypatch.setenv("HIBP_API_KEY", key)
+    monkeypatch.setattr(server.time, "time", lambda: 1000.0)
+    assert server._hibp_mark_verified(
+        key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
+
+    payload = _health_hibp_status()
+
+    assert payload["tools_status"]["have-i-been-pwned"] is True
+    assert payload["hibp"]["configured"] is True
+    assert payload["hibp"]["verified"] is True
+    assert payload["hibp"]["verification_age_seconds"] == 0.0
+
+
+def test_health_reports_hibp_unavailable_after_verification_ttl(monkeypatch):
+    key = "c" * 32
+    monkeypatch.setenv("HIBP_API_KEY", key)
+    monkeypatch.setattr(server.time, "time", lambda: 1000.0)
+    assert server._hibp_mark_verified(
+        key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
+    monkeypatch.setattr(
+        server.time, "time", lambda: 1000.0 + server.HIBP_VERIFICATION_TTL_SECONDS + 1
+    )
+
+    payload = _health_hibp_status()
+
+    assert payload["tools_status"]["have-i-been-pwned"] is False
+    assert payload["hibp"]["verified"] is False
+    assert payload["hibp"]["verification_age_seconds"] is None
+
+
+def test_health_reports_hibp_unavailable_when_configured_key_changes(monkeypatch):
+    original_key = "d" * 32
+    monkeypatch.setenv("HIBP_API_KEY", original_key)
+    assert server._hibp_mark_verified(
+        original_key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
+    monkeypatch.setenv("HIBP_API_KEY", "e" * 32)
+
+    payload = _health_hibp_status()
+
+    assert payload["tools_status"]["have-i-been-pwned"] is False
+    assert payload["hibp"]["verified"] is False
+
+
+def test_health_reports_hibp_unavailable_after_failed_reverification(monkeypatch):
+    key = "f" * 32
+    monkeypatch.setenv("HIBP_API_KEY", key)
+    assert server._hibp_mark_verified(
+        key, subscription={"SubscriptionName": "Pwned 1"}, status_code=200
+    )
+    assert not server._hibp_mark_verified(
+        key, subscription={"SubscriptionName": "Pwned 1"}, status_code=503
+    )
+
+    payload = _health_hibp_status()
+
+    assert payload["tools_status"]["have-i-been-pwned"] is False
+    assert payload["hibp"]["verified"] is False
+
+
+def test_health_never_calls_hibp_transport(monkeypatch):
+    monkeypatch.setenv("HIBP_API_KEY", "0" * 32)
+
+    def transport_must_not_run(*args, **kwargs):
+        raise AssertionError("health must not call HIBP transport")
+
+    monkeypatch.setattr(requests, "get", transport_must_not_run)
+    payload = _health_hibp_status()
+
+    assert payload["tools_status"]["have-i-been-pwned"] is False
+    assert payload["hibp"]["verified"] is False
+
+
 def test_breached_account_rejects_object_json():
     client = HIBPClient("a" * 32, transport=FakeTransport(FakeResponse(200, {}, {})))
     result = client.breached_account("person@example.test")

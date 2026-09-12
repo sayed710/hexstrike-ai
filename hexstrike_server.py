@@ -9079,9 +9079,13 @@ TOOL_JAR_SENTINELS = {
     "stegsolve": (("/opt/stegsolve/stegsolve.jar", "stegsolve.StegSolve"),),
 }
 
-NON_EXECUTABLE_TOOL_LABELS = frozenset({
-    "have-i-been-pwned",
-})
+NON_EXECUTABLE_TOOL_LABELS = frozenset()
+
+HIBP_CAPABILITY_SENTINEL = (
+    "/api/tools/have_i_been_pwned",
+    "have_i_been_pwned",
+    "POST",
+)
 
 
 # Verification is deliberately process-local.  A restart produces a new salt
@@ -9187,6 +9191,40 @@ def _hibp_configuration_state() -> dict[str, bool]:
     }
 
 
+def _hibp_integration_present() -> bool:
+    """Return whether the registered HIBP adapter and its client are present."""
+    route, endpoint, required_method = HIBP_CAPABILITY_SENTINEL
+    view_function = app.view_functions.get(endpoint)
+    if not callable(HIBPClient) or not callable(view_function):
+        return False
+    return any(
+        rule.rule == route
+        and rule.endpoint == endpoint
+        and required_method in getattr(rule, "methods", ())
+        for rule in app.url_map.iter_rules()
+    )
+
+
+def _hibp_health_state() -> dict[str, object]:
+    """Build local HIBP health metadata without contacting the HIBP service."""
+    integration_present = _hibp_integration_present()
+    api_key = os.environ.get("HIBP_API_KEY")
+    configured = bool(
+        callable(HIBPClient) and HIBPClient.validate_api_key(api_key)
+    )
+    now = time.time()
+    verified = configured and _hibp_is_verified(api_key, now=now)
+    verification_age_seconds = None
+    if verified and _hibp_verification_state.verified_at is not None:
+        verification_age_seconds = max(0.0, now - _hibp_verification_state.verified_at)
+    return {
+        "integration_present": integration_present,
+        "configured": configured,
+        "verified": verified,
+        "verification_age_seconds": verification_age_seconds,
+    }
+
+
 def _dedupe_tool_categories(categories):
     """Keep the first category occurrence of each capability label."""
     seen = set()
@@ -9274,6 +9312,13 @@ def _tool_is_available(tool, executable_finder=None, executable_file_checker=Non
 
     if tool in TOOL_BUILTIN_CAPABILITY_SENTINELS:
         return _is_builtin_capability_available(tool)
+    if tool == "have-i-been-pwned":
+        api_key = os.environ.get("HIBP_API_KEY")
+        return (
+            _hibp_integration_present()
+            and HIBPClient.validate_api_key(api_key)
+            and _hibp_is_verified(api_key)
+        )
     if tool in NON_EXECUTABLE_TOOL_LABELS:
         return False
     def path_is_executable(candidate):
@@ -9545,6 +9590,7 @@ def health_check():
         "total_tools_available": sum(1 for tool, available in tools_status.items() if available),
         "total_tools_count": len(all_tools),
         "category_stats": category_stats,
+        "hibp": _hibp_health_state(),
         "cache_stats": cache.get_stats(),
         "telemetry": telemetry.get_stats(),
         "uptime": time.time() - telemetry.stats["start_time"]
