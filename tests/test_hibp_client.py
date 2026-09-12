@@ -304,6 +304,7 @@ def test_health_reports_hibp_unavailable_without_a_valid_key(monkeypatch, api_ke
 
 def test_health_reports_valid_but_never_verified_hibp_key_as_unavailable(monkeypatch):
     monkeypatch.setenv("HIBP_API_KEY", "a" * 32)
+    server._hibp_invalidate_verification()
 
     payload = _health_hibp_status()
 

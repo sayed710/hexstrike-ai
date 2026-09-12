@@ -364,13 +364,21 @@ def test_hibp_detection_requires_registered_integration_not_a_path(server, monke
     ) is True
 
     monkeypatch.setattr(server.app, "url_map", SimpleNamespace(iter_rules=lambda: iter(())))
-    assert server._tool_is_available("have-i-been-pwned") is False
+    assert server._tool_is_available(
+        "have-i-been-pwned",
+        executable_finder=lambda name: "/tmp/fake-executable",
+        executable_file_checker=lambda path: True,
+    ) is False
 
 
 def test_hibp_detection_requires_a_registered_client(server, monkeypatch):
     monkeypatch.setattr(server, "HIBPClient", None)
 
-    assert server._tool_is_available("have-i-been-pwned") is False
+    assert server._tool_is_available(
+        "have-i-been-pwned",
+        executable_finder=lambda name: "/tmp/fake-executable",
+        executable_file_checker=lambda path: True,
+    ) is False
 
 
 def test_health_totals_and_labels_are_unique(server, monkeypatch):
