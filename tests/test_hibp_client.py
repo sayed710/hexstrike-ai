@@ -440,3 +440,205 @@ def test_breached_domain_rejects_invalid_domain_without_transport(domain):
     assert not result.ok
     assert result.error.category is HIBPErrorCategory.INVALID_CONFIGURATION
     assert transport.calls == []
+
+
+# The route tests deliberately replace the entire upstream client.  They make
+# the Flask adapter deterministic and prove it never performs a live request.
+@dataclass
+class FakeRouteResult:
+    ok: bool
+    data: object = None
+    status_code: int | None = 200
+    error: object = None
+    not_found: bool = False
+
+
+class FakeRouteClient:
+    results = {}
+    calls = []
+
+    def __init__(self, api_key):
+        if not api_key:
+            raise ValueError("missing key")
+        self.calls.append(("init", api_key))
+
+    @staticmethod
+    def validate_api_key(api_key):
+        return bool(api_key)
+
+    def breached_account(self, email):
+        self.calls.append(("email", email))
+        return self.results["email"]
+
+    def subscription_status(self):
+        self.calls.append(("subscription_status",))
+        return self.results["subscription_status"]
+
+    def subscribed_domains(self):
+        self.calls.append(("subscribed_domains",))
+        return self.results["subscribed_domains"]
+
+    def breached_domain(self, domain, subscribed_domains):
+        self.calls.append(("domain", domain, subscribed_domains))
+        return self.results["domain"]
+
+
+@pytest.fixture
+def hibp_route(monkeypatch):
+    FakeRouteClient.calls = []
+    FakeRouteClient.results = {
+        "email": FakeRouteResult(True, []),
+        "subscription_status": FakeRouteResult(True, {"SubscriptionName": "Pwned 1"}),
+        "subscribed_domains": FakeRouteResult(True, [{"DomainName": "example.test"}]),
+        "domain": FakeRouteResult(True, {"PwnCount": 1}),
+    }
+    monkeypatch.setenv("HIBP_API_KEY", "a" * 32)
+    monkeypatch.setattr(server, "HIBPClient", FakeRouteClient)
+    return server.app.test_client()
+
+
+def _route_error(category, status_code):
+    return FakeRouteResult(
+        False,
+        status_code=status_code,
+        error=type("Error", (), {"category": category, "retry_after_seconds": 7})(),
+    )
+
+
+def test_route_action_missing_json_returns_fixed_bad_request(hibp_route):
+    response = hibp_route.post("/api/tools/have_i_been_pwned")
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Invalid HIBP request"}
+    assert FakeRouteClient.calls == []
+
+
+def test_route_action_unknown_action_returns_fixed_bad_request(hibp_route):
+    response = hibp_route.post("/api/tools/have_i_been_pwned", json={"action": "other"})
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Unsupported HIBP action"}
+    assert FakeRouteClient.calls == []
+
+
+def test_route_action_email_returns_breaches_with_exact_attribution(hibp_route):
+    FakeRouteClient.results["email"] = FakeRouteResult(True, [{"Name": "Example"}])
+
+    response = hibp_route.post(
+        "/api/tools/have_i_been_pwned", json={"action": "email", "email": "person@example.test"}
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "action": "email",
+        "breaches": [{"Name": "Example"}],
+        "attribution": {"source": "Have I Been Pwned", "source_url": "https://haveibeenpwned.com/"},
+    }
+
+
+def test_route_action_email_404_is_no_breaches_200(hibp_route):
+    FakeRouteClient.results["email"] = FakeRouteResult(True, [], 404, not_found=True)
+
+    response = hibp_route.post(
+        "/api/tools/have_i_been_pwned", json={"action": "email", "email": "person@example.test"}
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["breaches"] == []
+    assert response.get_json()["attribution"] == {
+        "source": "Have I Been Pwned", "source_url": "https://haveibeenpwned.com/"
+    }
+
+
+def test_route_action_subscription_status_returns_only_safe_metadata(hibp_route):
+    FakeRouteClient.results["subscription_status"] = FakeRouteResult(
+        True, {"SubscriptionName": "Pwned 1", "Rpm": 10, "Unexpected": "secret"}
+    )
+
+    response = hibp_route.post("/api/tools/have_i_been_pwned", json={"action": "subscription_status"})
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "action": "subscription_status", "subscription": {"SubscriptionName": "Pwned 1", "Rpm": 10}
+    }
+
+
+def test_route_action_verify_without_api_key_fails_closed(monkeypatch):
+    monkeypatch.delenv("HIBP_API_KEY", raising=False)
+    monkeypatch.setattr(server, "HIBPClient", FakeRouteClient)
+
+    response = server.app.test_client().post("/api/tools/have_i_been_pwned", json={"action": "verify"})
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "HIBP API key is not configured"}
+    assert not server._hibp_is_verified(None)
+
+
+def test_route_action_verify_marks_only_safe_200_metadata(hibp_route):
+    FakeRouteClient.results["subscription_status"] = FakeRouteResult(
+        True, {"SubscriptionName": "Pwned 1", "Unexpected": "secret"}, 200
+    )
+
+    response = hibp_route.post("/api/tools/have_i_been_pwned", json={"action": "verify"})
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "action": "verify", "verified": True, "subscription": {"SubscriptionName": "Pwned 1"}
+    }
+    assert server._hibp_is_verified("a" * 32)
+
+
+def test_route_action_subscription_status_does_not_mutate_verification(hibp_route):
+    response = hibp_route.post("/api/tools/have_i_been_pwned", json={"action": "subscription_status"})
+
+    assert response.status_code == 200
+    assert not server._hibp_is_verified("a" * 32)
+
+
+def test_route_action_domain_unsubscribed_does_not_lookup_domain(hibp_route):
+    FakeRouteClient.results["subscribed_domains"] = FakeRouteResult(True, [{"DomainName": "other.test"}])
+
+    response = hibp_route.post(
+        "/api/tools/have_i_been_pwned", json={"action": "domain", "domain": "example.test"}
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "Domain is not authorized"}
+    assert [call[0] for call in FakeRouteClient.calls] == ["init", "subscribed_domains"]
+
+
+@pytest.mark.parametrize(
+    ("category", "status_code", "expected_status", "message"),
+    [
+        (HIBPErrorCategory.AUTHENTICATION, 401, 401, "HIBP authentication failed"),
+        (HIBPErrorCategory.FORBIDDEN, 403, 403, "HIBP request was forbidden"),
+        (HIBPErrorCategory.RATE_LIMITED, 429, 429, "HIBP rate limit exceeded"),
+        (HIBPErrorCategory.UPSTREAM, 503, 502, "HIBP service is unavailable"),
+    ],
+)
+def test_route_action_maps_upstream_errors_to_safe_responses(
+    hibp_route, category, status_code, expected_status, message
+):
+    FakeRouteClient.results["email"] = _route_error(category, status_code)
+
+    response = hibp_route.post(
+        "/api/tools/have_i_been_pwned", json={"action": "email", "email": "person@example.test"}
+    )
+
+    assert response.status_code == expected_status
+    assert response.get_json() == {"error": message}
+
+
+def test_route_action_never_logs_full_email_or_api_key(hibp_route, caplog, monkeypatch):
+    email = "person+private@example.test"
+    api_key = "a" * 32
+    monkeypatch.setenv("HIBP_API_KEY", api_key)
+    caplog.clear()
+
+    response = hibp_route.post(
+        "/api/tools/have_i_been_pwned", json={"action": "email", "email": email}
+    )
+
+    assert response.status_code == 200
+    assert email not in caplog.text
+    assert api_key not in caplog.text

@@ -9297,6 +9297,124 @@ def _tool_is_available(tool, executable_finder=None, executable_file_checker=Non
 
 # API Routes
 
+_HIBP_ATTRIBUTION = {
+    "source": "Have I Been Pwned",
+    "source_url": "https://haveibeenpwned.com/",
+}
+
+
+def _hibp_error_response(result):
+    """Map a client error to a stable, non-sensitive HTTP response."""
+    error = getattr(result, "error", None)
+    category = getattr(getattr(error, "category", None), "value", None)
+    if category is None:
+        category = getattr(error, "category", None)
+    responses = {
+        "invalid_configuration": (400, "Invalid HIBP request"),
+        "authentication": (401, "HIBP authentication failed"),
+        "forbidden": (403, "HIBP request was forbidden"),
+        "not_found": (404, "HIBP resource was not found"),
+        "rate_limited": (429, "HIBP rate limit exceeded"),
+    }
+    status_code, message = responses.get(category, (502, "HIBP service is unavailable"))
+    return jsonify({"error": message}), status_code
+
+
+def _hibp_authorizes_domain(domain, subscribed_domains):
+    """Check the already-returned subscription records without extra lookup work."""
+    if not isinstance(domain, str) or not isinstance(subscribed_domains, list):
+        return False
+    normalized = domain.strip().lower().rstrip(".")
+    if not normalized:
+        return False
+    for record in subscribed_domains:
+        if not isinstance(record, dict):
+            return False
+        candidate = record.get("DomainName")
+        if not isinstance(candidate, str):
+            return False
+        if candidate.strip().lower().rstrip(".") == normalized:
+            return True
+    return False
+
+
+@app.route("/api/tools/have_i_been_pwned", methods=["POST"])
+def have_i_been_pwned():
+    """Expose a small, safe adapter over the HIBP client actions."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid HIBP request"}), 400
+    action = payload.get("action")
+    if action not in {"email", "subscription_status", "subscribed_domains", "domain", "verify"}:
+        return jsonify({"error": "Unsupported HIBP action"}), 400
+
+    if action == "email" and (not isinstance(payload.get("email"), str) or not payload["email"].strip()):
+        return jsonify({"error": "Invalid HIBP request"}), 400
+    if action == "domain" and (not isinstance(payload.get("domain"), str) or not payload["domain"].strip()):
+        return jsonify({"error": "Invalid HIBP request"}), 400
+
+    api_key = os.environ.get("HIBP_API_KEY")
+    try:
+        client = HIBPClient(api_key)
+    except (TypeError, ValueError):
+        _hibp_invalidate_verification()
+        return jsonify({"error": "HIBP API key is not configured"}), 503
+
+    if action == "email":
+        result = client.breached_account(payload["email"])
+        if not result.ok:
+            return _hibp_error_response(result)
+        return jsonify({
+            "action": "email",
+            "breaches": result.data if isinstance(result.data, list) else [],
+            "attribution": _HIBP_ATTRIBUTION,
+        })
+
+    if action == "subscription_status":
+        result = client.subscription_status()
+        if not result.ok:
+            return _hibp_error_response(result)
+        return jsonify({
+            "action": "subscription_status",
+            "subscription": _safe_subscription_metadata(result.data),
+        })
+
+    if action == "subscribed_domains":
+        result = client.subscribed_domains()
+        if not result.ok:
+            return _hibp_error_response(result)
+        return jsonify({"action": "subscribed_domains", "domains": result.data})
+
+    if action == "domain":
+        subscribed = client.subscribed_domains()
+        if not subscribed.ok:
+            return _hibp_error_response(subscribed)
+        if not _hibp_authorizes_domain(payload["domain"], subscribed.data):
+            return jsonify({"error": "Domain is not authorized"}), 403
+        result = client.breached_domain(payload["domain"], subscribed.data)
+        if not result.ok:
+            return _hibp_error_response(result)
+        return jsonify({
+            "action": "domain",
+            "breach": result.data,
+            "attribution": _HIBP_ATTRIBUTION,
+        })
+
+    # Only the explicit verify action is allowed to alter verification state.
+    result = client.subscription_status()
+    safe_metadata = _safe_subscription_metadata(result.data) if result.ok else {}
+    if (
+        result.ok
+        and result.status_code == 200
+        and safe_metadata
+        and _hibp_mark_verified(api_key, subscription=safe_metadata, status_code=result.status_code)
+    ):
+        return jsonify({"action": "verify", "verified": True, "subscription": safe_metadata})
+    _hibp_invalidate_verification()
+    if not result.ok:
+        return _hibp_error_response(result)
+    return jsonify({"error": "HIBP verification failed"}), 502
+
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint with comprehensive tool detection"""
